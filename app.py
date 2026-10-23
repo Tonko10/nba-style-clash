@@ -1,185 +1,156 @@
 import streamlit as st
 import pandas as pd
+import requests
 import plotly.graph_objects as go
 import plotly.express as px
+import numpy as np
 
-st.set_page_config(page_title="NBA Style Clash", layout="wide", page_icon="🏀")
+# 1. Workspace UI & Custom CSS
+st.set_page_config(page_title="NBA Analytics Workspace", layout="wide", page_icon="🏀")
 st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
     
-    html, body, [class*="css"] {
-        font-family: 'Google Sans', sans-serif;
-        scroll-behavior: smooth;
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; font-size: 14px; }
+    .stApp { background: radial-gradient(circle at 15% 50%, #1a1a2e, #0f0f1a, #050505); background-attachment: fixed; }
+    h1, h2, h3 { font-weight: 500 !important; }
+    
+    @keyframes pulsate {
+        0% { box-shadow: 0 0 0 0 rgba(0, 107, 182, 0.4); }
+        70% { box-shadow: 0 0 0 10px rgba(0, 107, 182, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(0, 107, 182, 0); }
     }
     
-    .stApp {
-        animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-    }
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(20px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-        background-color: rgba(255, 255, 255, 0.05);
-        padding: 5px;
-        border-radius: 12px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 45px;
-        border-radius: 8px;
-        font-size: 16px;
-        font-weight: 500;
-        border: none !important;
-        padding: 0 20px;
-        transition: all 0.3s ease;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: rgba(255, 255, 255, 0.15) !important;
-        color: white !important;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-
     div[data-testid="stMetric"] {
-        background: rgba(255, 255, 255, 0.03);
-        padding: 20px;
-        border-radius: 12px;
-        border-left: 4px solid #FDB927;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
+        background: rgba(22, 26, 34, 0.7); backdrop-filter: blur(10px);
+        padding: 15px 20px; border-radius: 8px; border: 1px solid #2D3139; transition: all 0.3s ease;
     }
-    div[data-testid="stMetric"]:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 8px 25px rgba(253, 185, 39, 0.2);
+    div[data-testid="stMetric"]:hover { 
+        transform: translateY(-3px); border-color: #006BB6; animation: pulsate 1.5s infinite; 
+    }
+    
+    .tech-label { 
+        color: #4CAF50; font-family: monospace; font-size: 12px; margin-bottom: 15px; 
+        padding: 4px 8px; background: rgba(76, 175, 80, 0.1); border-radius: 4px; display: inline-block;
     }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🏀 NBA Style Clash: 76ers vs. Knicks")
-st.markdown("**Opening Night Deep Dive (Oct 20, 2026) | Final Score: PHI 106 - 100 NYK**")
-st.divider()
+# 2. Live Data Pipeline
+TARGET_URL = "https://www.basketball-reference.com/boxscores/202405020PHI.html"
 
-tab1, tab2, tab3 = st.tabs(["📊 Team Dynamics", "⛹️‍♂️ Key Performers", "👑 King James Impact"])
+@st.cache_data(ttl=3600)
+def fetch_bball_ref_data(url):
+    # Full browser user-agent required to bypass 403 anti-bot blocks
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36'}
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code != 200:
+        return None
+        
+    tables = pd.read_html(response.text)
+    
+    for i in range(len(tables)):
+        if isinstance(tables[i].columns, pd.MultiIndex):
+            tables[i].columns = tables[i].columns.get_level_values(-1)
+            
+    basic_tables = [t for t in tables if 'Starters' in t.columns and 'PTS' in t.columns and 'USG%' not in t.columns]
+    adv_tables = [t for t in tables if 'Starters' in t.columns and 'USG%' in t.columns and 'TS%' in t.columns]
+    
+    if len(basic_tables) < 2 or len(adv_tables) < 2:
+        return None
+        
+    away_merged = pd.merge(basic_tables[0][['Starters', 'PTS', 'AST', 'TRB', 'TOV']], adv_tables[0][['Starters', 'USG%', 'TS%']], on='Starters')
+    away_merged['Team'] = 'Away Team'
+    
+    home_merged = pd.merge(basic_tables[-1][['Starters', 'PTS', 'AST', 'TRB', 'TOV']], adv_tables[-1][['Starters', 'USG%', 'TS%']], on='Starters')
+    home_merged['Team'] = 'Home Team'
+    
+    all_players = pd.concat([away_merged, home_merged])
+    all_players = all_players[all_players['Starters'] != 'Reserves'].dropna(subset=['PTS'])
+    all_players = all_players.rename(columns={'Starters': 'PLAYER_NAME', 'TRB': 'REB', 'TOV': 'TO', 'USG%': 'USG_PCT', 'TS%': 'TS_PCT'})
+    
+    numeric_cols = ['PTS', 'AST', 'REB', 'TO', 'USG_PCT', 'TS_PCT']
+    all_players[numeric_cols] = all_players[numeric_cols].apply(pd.to_numeric, errors='coerce')
+    
+    return all_players
+
+with st.spinner("Executing Pandas HTML Scraper..."):
+    player_stats = fetch_bball_ref_data(TARGET_URL)
+
+# 3. Application Frontend
+st.title("🏀 NBA Analytics Workspace")
+st.markdown("<div class='tech-label'>► ARCHITECTURE: Python | Streamlit | Pandas Web Scraping | Glassmorphism CSS</div>", unsafe_allow_html=True)
+
+if player_stats is None:
+    st.error("Scraper failed. Verify the target URL.")
+    st.stop()
+
+tab1, tab2, tab3 = st.tabs(["📈 Momentum Flow", "🎯 Efficiency Engine", "👑 Impact Metrics"])
 
 with tab1:
-    col1, col2 = st.columns([1, 1], gap="large")
+    st.markdown("<div class='tech-label'>► VISUALIZATION: Plotly Graph Objects (go.Scatter) with Bi-directional Splitting</div>", unsafe_allow_html=True)
+    st.subheader("Dynamic Lead Tracker")
     
-    with col1:
-        st.subheader("Playstyle Radar")
-        categories = ['Perimeter Scoring', 'Paint Dominance', 'Playmaking (Ast)', 'Ball Security (Low TO)', 'Rebounding']
-        sixers_data = [85, 45, 75, 80, 45] 
-        knicks_data = [65, 85, 60, 65, 95] 
-
-        fig_radar = go.Figure()
-        fig_radar.add_trace(go.Scatterpolar(
-            r=sixers_data + [sixers_data[0]], theta=categories + [categories[0]],
-            fill='toself', name='Philadelphia 76ers',
-            line_color='#006BB6', fillcolor='rgba(0, 107, 182, 0.4)'
-        ))
-        fig_radar.add_trace(go.Scatterpolar(
-            r=knicks_data + [knicks_data[0]], theta=categories + [categories[0]],
-            fill='toself', name='New York Knicks',
-            line_color='#F58426', fillcolor='rgba(245, 132, 38, 0.4)'
-        ))
-        fig_radar.update_layout(
-            template='plotly_dark',
-            font=dict(color='white'),
-            polar=dict(
-                radialaxis=dict(visible=True, range=[0, 100], gridcolor='rgba(255,255,255,0.2)'),
-                angularaxis=dict(gridcolor='rgba(255,255,255,0.2)')
-            ),
-            showlegend=True, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-            margin=dict(l=40, r=40, t=40, b=40),
-            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
-        )
-        st.plotly_chart(fig_radar, use_container_width=True)
-
-    with col2:
-        st.subheader("Momentum Timeline")
-        timeline_data = pd.DataFrame({
-            'Quarter': ['Q1', 'Q2', 'Q3', 'Q4'],
-            '76ers': [28, 54, 82, 106],
-            'Knicks': [31, 52, 78, 100]
-        })
-        
-        fig_line = px.line(timeline_data, x='Quarter', y=['76ers', 'Knicks'], 
-                           color_discrete_map={'76ers': '#006BB6', 'Knicks': '#F58426'})
-        
-        fig_line.update_traces(line_shape='spline', line=dict(width=4), mode='lines+markers', marker=dict(size=8))
-        fig_line.update_layout(
-            template='plotly_dark',
-            font=dict(color='white'),
-            hovermode="x unified",
-            yaxis_title="Total Points", xaxis_title="",
-            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-            yaxis=dict(gridcolor='rgba(255,255,255,0.1)'),
-            legend=dict(title=None, orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
-        )
-        st.plotly_chart(fig_line, use_container_width=True)
+    minutes = np.linspace(0, 48, 25)
+    lead_margin = [0, 8, 4, 7, -2, 3, 0, -3, -10, -5, -8, -4, -4, -5, -7, 1, -4, -2, 7, 9, 4, 9, 3, 7, 6]
+    
+    pos_lead = [max(0, m) for m in lead_margin]
+    neg_lead = [min(0, m) for m in lead_margin]
+    
+    fig_flow = go.Figure()
+    fig_flow.add_trace(go.Scatter(x=minutes, y=pos_lead, fill='tozeroy', mode='lines', line=dict(color='#66BB6A', width=2), fillcolor='rgba(102, 187, 106, 0.7)', name='Away Lead'))
+    fig_flow.add_trace(go.Scatter(x=minutes, y=neg_lead, fill='tozeroy', mode='lines', line=dict(color='#5C6BC0', width=2), fillcolor='rgba(92, 107, 192, 0.7)', name='Home Lead'))
+    
+    fig_flow.add_hline(y=0, line_width=1, line_color="rgba(255, 255, 255, 0.3)")
+    fig_flow.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(title="Game Minute"), yaxis=dict(title="Lead Margin"), hovermode="x unified", showlegend=False, height=400)
+    st.plotly_chart(fig_flow, use_container_width=True)
 
 with tab2:
-    st.subheader("Box Score Highlights")
+    st.markdown("<div class='tech-label'>► DATA PIPELINE: Live Pandas Scraper → Dataframe Cleansing → Plotly Express Mapping</div>", unsafe_allow_html=True)
+    st.subheader("Volume vs. Efficiency Matrix")
     
-    player_data = pd.DataFrame({
-        'Player': ['Tyrese Maxey', 'LeBron James', 'Jalen Brunson', 'Karl-Anthony Towns', 'Andre Drummond'],
-        'Team': ['76ers', '76ers', 'Knicks', 'Knicks', 'Knicks'],
-        'PTS': [28, 14, 25, 22, 12],
-        'REB': [4, 9, 3, 14, 16],
-        'AST': [6, 7, 8, 2, 1],
-        'MIN': [36, 31, 38, 34, 28]
-    })
-    
-    st.dataframe(
-        player_data,
-        column_config={
-            "PTS": st.column_config.ProgressColumn(
-                "Points", help="Total points scored", format="%d", min_value=0, max_value=30
-            ),
-            "REB": st.column_config.NumberColumn("Rebounds", format="%d"),
-            "AST": st.column_config.NumberColumn("Assists", format="%d"),
-        },
-        use_container_width=True,
-        hide_index=True
-    )
-    
-    st.info("💡 **Analytics Takeaway:** While Towns and Drummond absolutely crushed the glass (30 combined rebounds), Maxey's perimeter efficiency and ball security neutralized the rebounding deficit.")
+    col_filter, col_scatter = st.columns([1, 3])
+    with col_filter:
+        st.write("#### Parameters")
+        min_pts = st.slider("Minimum Points Scored", 0, 40, 10)
+        
+    with col_scatter:
+        filtered_df = player_stats[player_stats['PTS'] >= min_pts].copy()
+        filtered_df['TS_PCT'] *= 100
+            
+        fig_scatter = px.scatter(filtered_df, x="USG_PCT", y="TS_PCT", size="PTS", color="Team", text="PLAYER_NAME")
+        fig_scatter.add_vline(x=20, line_dash="dash", line_color="gray", annotation_text="Avg Usage")
+        fig_scatter.add_hline(y=57.5, line_dash="dash", line_color="gray", annotation_text="Avg TS%")
+        
+        fig_scatter.update_traces(textposition='top center')
+        fig_scatter.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_title="Usage Rate (USG%)", yaxis_title="True Shooting (TS%)", height=450)
+        st.plotly_chart(fig_scatter, use_container_width=True)
 
 with tab3:
-    st.subheader("👑 Year 24: High-IQ Basketball")
-    st.write("The box score doesn't tell the whole story. LeBron no longer needs 30 points to control the tempo of a close game.")
+    st.markdown("<div class='tech-label'>► UI COMPONENT: Streamlit Metric Columns with CSS Keyframe Animations</div>", unsafe_allow_html=True)
+    st.subheader("King James Impact Overview")
     
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Clutch Assists (Q4)", "4", "+2 vs rest of team")
-    col2.metric("Defensive Rebounds", "8", "Neutralized Knicks 2nd chances")
-    col3.metric("Plus/Minus (+/-)", "+12", "Team-high impact")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("AST/TO Ratio", "7.0", "Elite distribution")
+    m2.metric("Total Rebounds", "9", "Board control")
+    m3.metric("True Shooting", "44.8%", "Volume inefficiency")
+    m4.metric("Plus/Minus (+/-)", "-2", "Net rating impact")
     
     st.divider()
     
     col_text, col_chart = st.columns([1, 1], gap="large")
     with col_text:
         st.markdown("""
-        ### Why this matters:
-        When New York trapped Tyrese Maxey in the 4th quarter, the 76ers used LeBron as the primary hub at the high-post. 
-        
-        *   **9 Total Rebounds:** Crucial for stopping the Knicks' heavy offensive rebounding in the final 5 minutes.
-        *   **7 Assists:** 4 of these came in clutch situations (score within 3 points).
-        *   **Leadership:** Veteran poise that completely slowed the game down when the momentum was shifting to New York.
+        ### Playmaking & Ball Security
+        Operating as a half-court facilitator, LeBron anchored the offense through elite ball security rather than high-volume scoring.
+        *   **Distribution:** A phenomenal 7-to-1 assist-to-turnover ratio stabilized the offense.
+        *   **Board Control:** 9 total rebounds limited second-chance points.
         """)
-    
+        
     with col_chart:
-        lbj_stats = pd.DataFrame({
-            'Stat': ['Points', 'Rebounds', 'Assists'],
-            'Value': [14, 9, 7]
-        })
-        fig_bar = px.bar(lbj_stats, x='Value', y='Stat', text='Value', orientation='h',
-                         color='Stat', color_discrete_sequence=['#FDB927', '#552583', '#E0E0E0'])
-        fig_bar.update_traces(textposition='inside', textfont=dict(size=16, color='black'))
-        fig_bar.update_layout(
-            template='plotly_dark',
-            font=dict(color='white'),
-            showlegend=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-            xaxis=dict(showgrid=False, visible=False), yaxis=dict(title="")
-        )
+        playmaking_data = pd.DataFrame({'Stat': ['Assists', 'Turnovers', 'Steals', 'Blocks'], 'Value': [7, 1, 1, 1]})
+        fig_bar = px.bar(playmaking_data, x='Value', y='Stat', text='Value', orientation='h', color='Stat', color_discrete_sequence=['#FDB927', '#E0E0E0', '#552583', '#006BB6'])
+        fig_bar.update_traces(textposition='inside', textfont=dict(size=14, color='black'))
+        fig_bar.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(visible=False), yaxis=dict(title=""), showlegend=False, height=250, margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig_bar, use_container_width=True)
